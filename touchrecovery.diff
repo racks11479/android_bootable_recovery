@@ -1,0 +1,943 @@
+diff --git a/common.h b/common.h
+index 4c55c06..63f1a2a 100644
+--- a/common.h
++++ b/common.h
+@@ -23,7 +23,7 @@
+ void ui_init();
+ 
+ // Use KEY_* codes from <linux/input.h> or KEY_DREAM_* from "minui/minui.h".
+-int ui_wait_key();            // waits for a key/button press, returns the code
++struct keyStruct *ui_wait_key();            // waits for a key/button press, returns the code
+ int ui_key_pressed(int key);  // returns >0 if the code is currently pressed
+ int ui_text_visible();        // returns >0 if text log is currently visible
+ int ui_text_ever_visible();   // returns >0 if text log was ever visible
+@@ -63,6 +63,27 @@ enum {
+   BACKGROUND_ICON_FIRMWARE_ERROR,
+   NUM_BACKGROUND_ICONS
+ };
++
++//Stuff related to touch menu buttons
++enum {
++  MENU_BACK,
++  MENU_DOWN,
++  MENU_UP,
++  MENU_SELECT,
++  MENU_BACK_M,
++  MENU_DOWN_M,
++  MENU_UP_M,
++  MENU_SELECT_M,
++  NUM_MENU_ICON
++};
++
++//Struct to return key events to recovery.c through ui_wait_key()
++struct keyStruct{
++	int code;
++	int x;
++	int y;
++};
++
+ void ui_set_background(int icon);
+ 
+ // Get a malloc'd copy of the screen image showing (only) the specified icon.
+diff --git a/default_recovery_ui.c b/default_recovery_ui.c
+index be8b7e8..6eef493 100644
+--- a/default_recovery_ui.c
++++ b/default_recovery_ui.c
+@@ -20,6 +20,33 @@
+ #include "common.h"
+ #include "extendedcommands.h"
+ 
++/*
++	to enable on-screen debug code printing set this to 1
++	to disable on-screen debug code printing set this to 0
++*/
++int TOUCH_CONTROL_DEBUG = 0;
++
++//In this case MENU_SELECT icon has maximum possible height.
++#define MENU_MAX_HEIGHT 80 //gr_get_height(gMenuIcon[MENU_SELECT])		//Maximum allowed height for navigation icons
++
++//Device specific boundaries for touch recognition
++/*	
++	WARNING
++	these might not be the same as resX, resY (from below)
++	these have to be found by setting them to zero and then in debug mode
++	check the values returned by on screen touch output by click on the 
++	touch panel extremeties
++*/
++int maxX=480;		//Set to 0 for debugging
++int maxY=800;		//Set to 0 for debugging
++
++/*
++	the values of following two variables are dependent on specifc device resolution
++	and can be obtained using the outputs of the gr_fb functions
++*/
++int resX=480;		//Value obtained from function 'gr_fb_width()'
++int resY=800;		//Value obtained from function 'gr_fb_height()'
++
+ char* MENU_HEADERS[] = { NULL };
+ 
+ char* MENU_ITEMS[] = { "reboot system now",
+@@ -49,3 +76,74 @@ int device_perform_action(int which) {
+ int device_wipe_data() {
+     return 0;
+ }
++
++int get_menu_icon_info(int indx1, int indx2) {
++//ToDo: Following switch case should be replaced by array or structure
++
++int caseN = indx1*4 + indx2;
++/*
++int MENU_ICON1[] = {
++		{  1*resX/8,	(resY - MENU_MAX_HEIGHT/2), 0*resX/4, 1*resX/4 },
++		{  3*resX/8,	(resY - MENU_MAX_HEIGHT/2), 1*resX/4, 2*resX/4 },
++		{  5*resX/8,	(resY - MENU_MAX_HEIGHT/2), 2*resX/4, 3*resX/4 },
++		{  7*resX/8,	(resY - MENU_MAX_HEIGHT/2), 3*resX/4, 4*resX/4 }, 
++	};
++
++*/
++
++switch (caseN) {
++	case 0:
++		return 1*resX/8;
++	case 1:
++		return (resY - MENU_MAX_HEIGHT/2);
++	case 2:
++		return 0*resX/4;
++	case 3:
++		return 1*resX/4;
++	case 4:
++		return 3*resX/8;
++	case 5:
++		return (resY - MENU_MAX_HEIGHT/2);
++	case 6:
++		return 1*resX/4;
++	case 7:
++		return 2*resX/4;
++	case 8:
++		return 5*resX/8;
++	case 9:
++		return (resY - MENU_MAX_HEIGHT/2);
++	case 10:
++		return 2*resX/4;
++	case 11:
++		return 3*resX/4;
++	case 12:
++		return 7*resX/8;
++	case 13:
++		return (resY - MENU_MAX_HEIGHT/2);
++	case 14:
++		return 3*resX/4;
++	case 15:
++		return 4*resX/4;
++
++}
++
++return 0;
++}
++
++
++//For those devices which has skewed X axis and Y axis detection limit (Not similar to XY resolution of device), So need normalization
++int MT_X(int x)
++{
++	int out;
++	out = maxX ? (x*gr_fb_width()/maxX) : x;		
++
++	return out;
++}
++
++int MT_Y(int y)
++{
++	int out;
++	out = maxY ? (y*gr_fb_height()/maxY) : y;		
++
++	return out;
++}
+\ No newline at end of file
+diff --git a/extendedcommands.c b/extendedcommands.c
+index 845626a..2e28d4e 100644
+--- a/extendedcommands.c
++++ b/extendedcommands.c
+@@ -44,6 +44,8 @@
+ #include "bmlutils/bmlutils.h"
+ #include "cutils/android_reboot.h"
+ 
++#define ABS_MT_POSITION_X 0x35  /* Center X ellipse position */
++
+ 
+ int signature_check_enabled = 1;
+ int script_assert_enabled = 1;
+@@ -960,13 +962,25 @@ void show_advanced_menu()
+             {
+                 ui_print("Outputting key codes.\n");
+                 ui_print("Go back to end debugging.\n");
+-                int key;
++                struct keyStruct{
++					int code;
++					int x;
++					int y;
++				}*key;
+                 int action;
+                 do
+                 {
+                     key = ui_wait_key();
+-                    action = device_handle_key(key, 1);
+-                    ui_print("Key: %d\n", key);
++					if(key->code == ABS_MT_POSITION_X)
++					{
++				        action = device_handle_mouse(key, 1);
++						ui_print("Touch: X: %d\tY: %d\n", key->x, key->y);
++					}
++					else
++					{
++				        action = device_handle_key(key->code, 1);
++						ui_print("Key: %x\n", key->code);
++					}
+                 }
+                 while (action != GO_BACK);
+                 break;
+diff --git a/minui/events.c b/minui/events.c
+index 2918afa..eb139dc 100644
+--- a/minui/events.c
++++ b/minui/events.c
+@@ -19,33 +19,167 @@
+ #include <fcntl.h>
+ #include <dirent.h>
+ #include <sys/poll.h>
++#include <limits.h>
+ 
+ #include <linux/input.h>
+ 
++#include "../common.h"
++
+ #include "minui.h"
+ 
+ #define MAX_DEVICES 16
+-#define MAX_MISC_FDS 16
+ 
+-#define BITS_PER_LONG (sizeof(unsigned long) * 8)
+-#define BITS_TO_LONGS(x) (((x) + BITS_PER_LONG - 1) / BITS_PER_LONG)
++#define VIBRATOR_TIMEOUT_FILE	"/sys/class/timed_output/vibrator/enable"
++#define VIBRATOR_TIME_MS	50
++
++#define PRESS_THRESHHOLD    10
+ 
+-#define test_bit(bit, array) \
+-    ((array)[(bit)/BITS_PER_LONG] & (1 << ((bit) % BITS_PER_LONG)))
++#define ABS_MT_POSITION_X 0x35
++#define ABS_MT_POSITION_Y 0x36
++#define ABS_MT_TOUCH_MAJOR 0x30
++#define SYN_MT_REPORT 2
++
++struct virtualkey {
++    int scancode;
++    int centerx, centery;
++    int width, height;
++};
+ 
+-struct fd_info {
+-    ev_callback cb;
+-    void *data;
++struct position {
++    int x, y;
++    int pressed;
++    struct input_absinfo xi, yi;
+ };
+ 
+-static struct pollfd ev_fds[MAX_DEVICES + MAX_MISC_FDS];
+-static struct fd_info ev_fdinfo[MAX_DEVICES + MAX_MISC_FDS];
++struct ev {
++    struct pollfd *fd;
++
++    struct virtualkey *vks;
++    int vk_count;
++
++    struct position p, mt_p;
++    int sent, mt_idx;
++};
+ 
++static struct pollfd ev_fds[MAX_DEVICES];
++static struct ev evs[MAX_DEVICES];
+ static unsigned ev_count = 0;
+-static unsigned ev_dev_count = 0;
+-static unsigned ev_misc_count = 0;
+ 
+-int ev_init(ev_callback input_cb, void *data)
++static inline int ABS(int x) {
++    return x<0?-x:x;
++}
++
++int vibrate(int timeout_ms)
++{
++    char str[20];
++    int fd;
++    int ret;
++
++    fd = open(VIBRATOR_TIMEOUT_FILE, O_WRONLY);
++    if (fd < 0)
++        return -1;
++
++    ret = snprintf(str, sizeof(str), "%d", timeout_ms);
++    ret = write(fd, str, ret);
++    close(fd);
++
++    if (ret < 0)
++       return -1;
++
++    return 0;
++}
++
++/* Returns empty tokens */
++static char *vk_strtok_r(char *str, const char *delim, char **save_str)
++{
++    if(!str) {
++        if(!*save_str) return NULL;
++        str = (*save_str) + 1;
++    }
++    *save_str = strpbrk(str, delim);
++    if(*save_str) **save_str = '\0';
++    return str;
++}
++
++static int vk_init(struct ev *e)
++{
++    char vk_path[PATH_MAX] = "/sys/board_properties/virtualkeys.";
++    char vks[2048], *ts;
++    ssize_t len;
++    int vk_fd;
++    int i;
++
++    e->vk_count = 0;
++
++    len = strlen(vk_path);
++    len = ioctl(e->fd->fd, EVIOCGNAME(sizeof(vk_path) - len), vk_path + len);
++    if (len <= 0)
++        return -1;
++
++    vk_fd = open(vk_path, O_RDONLY);
++    if (vk_fd < 0)
++        return -1;
++
++    len = read(vk_fd, vks, sizeof(vks)-1);
++    close(vk_fd);
++    if (len <= 0)
++        return -1;
++
++    vks[len] = '\0';
++
++    /* Parse a line like:
++        keytype:keycode:centerx:centery:width:height:keytype2:keycode2:centerx2:...
++    */
++    for (ts = vks, e->vk_count = 1; *ts; ++ts) {
++        if (*ts == ':')
++            ++e->vk_count;
++    }
++
++    if (e->vk_count % 6) {
++        LOGW("minui: %s is %d %% 6\n", vk_path, e->vk_count % 6);
++    }
++    e->vk_count /= 6;
++    if (e->vk_count <= 0)
++        return -1;
++
++    e->sent = 0;
++    e->mt_idx = 0;
++
++    ioctl(e->fd->fd, EVIOCGABS(ABS_X), &e->p.xi);
++    ioctl(e->fd->fd, EVIOCGABS(ABS_Y), &e->p.yi);
++    e->p.pressed = 0;
++
++    ioctl(e->fd->fd, EVIOCGABS(ABS_MT_POSITION_X), &e->mt_p.xi);
++    ioctl(e->fd->fd, EVIOCGABS(ABS_MT_POSITION_Y), &e->mt_p.yi);
++    e->mt_p.pressed = 0;
++
++    e->vks = malloc(sizeof(*e->vks) * e->vk_count);
++
++    for (i = 0; i < e->vk_count; ++i) {
++        char *token[6];
++        int j;
++
++        for (j = 0; j < 6; ++j) {
++            token[j] = vk_strtok_r((i||j)?NULL:vks, ":", &ts);
++        }
++
++        if (strcmp(token[0], "0x01") != 0) {
++            /* Java does string compare, so we do too. */
++            LOGW("minui: %s: ignoring unknown virtual key type %s\n", vk_path, token[0]);
++            continue;
++        }
++
++        e->vks[i].scancode = strtol(token[1], NULL, 0);
++        e->vks[i].centerx = strtol(token[2], NULL, 0);
++        e->vks[i].centery = strtol(token[3], NULL, 0);
++        e->vks[i].width = strtol(token[4], NULL, 0);
++        e->vks[i].height = strtol(token[5], NULL, 0);
++    }
++
++    return 0;
++}
++
++int ev_init(void)
+ {
+     DIR *dir;
+     struct dirent *de;
+@@ -54,122 +188,175 @@ int ev_init(ev_callback input_cb, void *data)
+     dir = opendir("/dev/input");
+     if(dir != 0) {
+         while((de = readdir(dir))) {
+-            unsigned long ev_bits[BITS_TO_LONGS(EV_MAX)];
+-
+ //            fprintf(stderr,"/dev/input/%s\n", de->d_name);
+             if(strncmp(de->d_name,"event",5)) continue;
+             fd = openat(dirfd(dir), de->d_name, O_RDONLY);
+             if(fd < 0) continue;
+ 
+-            /* read the evbits of the input device */
+-            if (ioctl(fd, EVIOCGBIT(0, sizeof(ev_bits)), ev_bits) < 0) {
+-                close(fd);
+-                continue;
+-            }
+-
+-            /* TODO: add ability to specify event masks. For now, just assume
+-             * that only EV_KEY and EV_REL event types are ever needed. */
+-            if (!test_bit(EV_KEY, ev_bits) && !test_bit(EV_REL, ev_bits)) {
+-                close(fd);
+-                continue;
+-            }
+-
+             ev_fds[ev_count].fd = fd;
+             ev_fds[ev_count].events = POLLIN;
+-            ev_fdinfo[ev_count].cb = input_cb;
+-            ev_fdinfo[ev_count].data = data;
++            evs[ev_count].fd = &ev_fds[ev_count];
++
++            /* Load virtualkeys if there are any */
++            vk_init(&evs[ev_count]);
++
+             ev_count++;
+-            ev_dev_count++;
+-            if(ev_dev_count == MAX_DEVICES) break;
++            if(ev_count == MAX_DEVICES) break;
+         }
+     }
+ 
+     return 0;
+ }
+ 
+-int ev_add_fd(int fd, ev_callback cb, void *data)
+-{
+-    if (ev_misc_count == MAX_MISC_FDS || cb == NULL)
+-        return -1;
+-
+-    ev_fds[ev_count].fd = fd;
+-    ev_fds[ev_count].events = POLLIN;
+-    ev_fdinfo[ev_count].cb = cb;
+-    ev_fdinfo[ev_count].data = data;
+-    ev_count++;
+-    ev_misc_count++;
+-    return 0;
+-}
+-
+ void ev_exit(void)
+ {
+-    while (ev_count > 0) {
+-        close(ev_fds[--ev_count].fd);
++    while (ev_count-- > 0) {
++	if (evs[ev_count].vk_count) {
++		free(evs[ev_count].vks);
++		evs[ev_count].vk_count = 0;
++	}
++        close(ev_fds[ev_count].fd);
+     }
+-    ev_misc_count = 0;
+-    ev_dev_count = 0;
+ }
+ 
+-int ev_wait(int timeout)
++static int vk_inside_display(__s32 value, struct input_absinfo *info, int screen_size)
+ {
+-    int r;
++    int screen_pos;
+ 
+-    r = poll(ev_fds, ev_count, timeout);
+-    if (r <= 0)
+-        return -1;
+-    return 0;
++    if (info->minimum == info->maximum)
++        return 0;
++
++    screen_pos = (value - info->minimum) * (screen_size - 1) / (info->maximum - info->minimum);
++    return (screen_pos >= 0 && screen_pos < screen_size);
+ }
+ 
+-void ev_dispatch(void)
++static int vk_tp_to_screen(struct position *p, int *x, int *y)
+ {
+-    unsigned n;
+-    int ret;
++    if (p->xi.minimum == p->xi.maximum || p->yi.minimum == p->yi.maximum)
++        return 0;
+ 
+-    for (n = 0; n < ev_count; n++) {
+-        ev_callback cb = ev_fdinfo[n].cb;
+-        if (cb && (ev_fds[n].revents & ev_fds[n].events))
+-            cb(ev_fds[n].fd, ev_fds[n].revents, ev_fdinfo[n].data);
++    *x = (p->x - p->xi.minimum) * (gr_fb_width() - 1) / (p->xi.maximum - p->xi.minimum);
++    *y = (p->y - p->yi.minimum) * (gr_fb_height() - 1) / (p->yi.maximum - p->yi.minimum);
++
++    if (*x >= 0 && *x < gr_fb_width() &&
++           *y >= 0 && *y < gr_fb_height()) {
++        return 0;
+     }
++
++    return 1;
+ }
+ 
+-int ev_get_input(int fd, short revents, struct input_event *ev)
++/* Translate a virtual key in to a real key event, if needed */
++/* Returns non-zero when the event should be consumed */
++static int vk_modify(struct ev *e, struct input_event *ev)
+ {
+-    int r;
++    int i;
++    int x, y;
+ 
+-    if (revents & POLLIN) {
+-        r = read(fd, ev, sizeof(*ev));
+-        if (r == sizeof(*ev))
++    if (ev->type == EV_KEY) {
++        if (ev->code == BTN_TOUCH)
++            e->p.pressed = ev->value;
++        return 0;
++    }
++
++    if (ev->type == EV_ABS) {
++        switch (ev->code) {
++        case ABS_X:
++            e->p.x = ev->value;
++            return !vk_inside_display(e->p.x, &e->p.xi, gr_fb_width());
++        case ABS_Y:
++            e->p.y = ev->value;
++            return !vk_inside_display(e->p.y, &e->p.yi, gr_fb_height());
++        case ABS_MT_POSITION_X:
++            if (e->mt_idx) return 1;
++            e->mt_p.x = ev->value;
++            return !vk_inside_display(e->mt_p.x, &e->mt_p.xi, gr_fb_width());
++        case ABS_MT_POSITION_Y:
++            if (e->mt_idx) return 1;
++            e->mt_p.y = ev->value;
++            return !vk_inside_display(e->mt_p.y, &e->mt_p.yi, gr_fb_height());
++        case ABS_MT_TOUCH_MAJOR:
++            if (e->mt_idx) return 1;
++            if (e->sent)
++                e->mt_p.pressed = (ev->value > 0);
++            else
++                e->mt_p.pressed = (ev->value > PRESS_THRESHHOLD);
+             return 0;
++        }
++
++        return 0;
+     }
+-    return -1;
+-}
+ 
+-int ev_sync_key_state(ev_set_key_callback set_key_cb, void *data)
+-{
+-    unsigned long key_bits[BITS_TO_LONGS(KEY_MAX)];
+-    unsigned long ev_bits[BITS_TO_LONGS(EV_MAX)];
+-    unsigned i;
+-    int ret;
++    if (ev->type != EV_SYN)
++        return 0;
+ 
+-    for (i = 0; i < ev_dev_count; i++) {
+-        int code;
++    if (ev->code == SYN_MT_REPORT) {
++        /* Ignore the rest of the points */
++        ++e->mt_idx;
++        return 1;
++    }
++    if (ev->code != SYN_REPORT)
++        return 0;
+ 
+-        memset(key_bits, 0, sizeof(key_bits));
+-        memset(ev_bits, 0, sizeof(ev_bits));
++    /* Report complete */
+ 
+-        ret = ioctl(ev_fds[i].fd, EVIOCGBIT(0, sizeof(ev_bits)), ev_bits);
+-        if (ret < 0 || !test_bit(EV_KEY, ev_bits))
+-            continue;
++    e->mt_idx = 0;
+ 
+-        ret = ioctl(ev_fds[i].fd, EVIOCGKEY(sizeof(key_bits)), key_bits);
+-        if (ret < 0)
+-            continue;
++    if (!e->p.pressed && !e->mt_p.pressed) {
++        /* No touch */
++        e->sent = 0;
++        return 0;
++    }
++
++    if (!(e->p.pressed && vk_tp_to_screen(&e->p, &x, &y)) &&
++            !(e->mt_p.pressed && vk_tp_to_screen(&e->mt_p, &x, &y))) {
++        /* No touch inside vk area */
++        return 0;
++    }
++
++    if (e->sent) {
++        /* We've already sent a fake key for this touch */
++        return 1;
++    }
+ 
+-        for (code = 0; code <= KEY_MAX; code++) {
+-            if (test_bit(code, key_bits))
+-                set_key_cb(code, 1, data);
++    /* The screen is being touched on the vk area */
++    e->sent = 1;
++
++    for (i = 0; i < e->vk_count; ++i) {
++        int xd = ABS(e->vks[i].centerx - x);
++        int yd = ABS(e->vks[i].centery - y);
++        if (xd < e->vks[i].width/2 && yd < e->vks[i].height/2) {
++            /* Fake a key event */
++            ev->type = EV_KEY;
++            ev->code = e->vks[i].scancode;
++            ev->value = 1;
++
++            vibrate(VIBRATOR_TIME_MS);
++            return 0;
+         }
+     }
+ 
+-    return 0;
++    return 1;
+ }
++
++int ev_get(struct input_event *ev, unsigned wait_time)
++{
++    int r;
++    unsigned n;
++
++    do {
++		r = poll(ev_fds, ev_count, wait_time);
++        if(r > 0) {
++            for(n = 0; n < ev_count; n++) {
++                if(ev_fds[n].revents & POLLIN) {
++                    r = read(ev_fds[n].fd, ev, sizeof(*ev));
++                    if(r == sizeof(*ev)) {
++                            return 0;
++                    }
++                }
++            }
++        }
++    } while(wait_time == -1);
++
++    return -1;
++}
+\ No newline at end of file
+diff --git a/recovery.c b/recovery.c
+index 3fe7ae2..cb50dc1 100644
+--- a/recovery.c
++++ b/recovery.c
+@@ -44,6 +44,9 @@
+ #include "extendedcommands.h"
+ #include "flashutils/flashutils.h"
+ 
++#define ABS_MT_POSITION_X 0x35  /* Center X ellipse position */
++#define ABS_MT_POSITION_Y 0x36  /* Center Y ellipse position */
++
+ static const struct option OPTIONS[] = {
+   { "send_intent", required_argument, NULL, 's' },
+   { "update_package", required_argument, NULL, 'u' },
+@@ -446,7 +449,9 @@ get_menu_selection(char** headers, char** items, int menu_only,
+     int wrap_count = 0;
+ 
+     while (chosen_item < 0 && chosen_item != GO_BACK) {
+-        int key = ui_wait_key();
++		struct keyStruct *key;
++		key = ui_wait_key();
++
+         int visible = ui_text_visible();
+ 
+         if (key == -1) {   // ui_wait_key() timed out
+@@ -459,7 +464,11 @@ get_menu_selection(char** headers, char** items, int menu_only,
+             }
+         }
+ 
+-        int action = device_handle_key(key, visible);
++		int action;
++		if(key->code == ABS_MT_POSITION_X)
++	        action = device_handle_mouse(key, visible);
++		else
++	        action = device_handle_key(key->code, visible);
+ 
+         int old_selected = selected;
+ 
+diff --git a/recovery_ui.h b/recovery_ui.h
+index 44e9e06..d2c3010 100644
+--- a/recovery_ui.h
++++ b/recovery_ui.h
+@@ -90,6 +90,18 @@ extern char* MENU_HEADERS[];
+ // Text of menu items.
+ extern char* MENU_ITEMS[];
+ 
++#define MENU_ICON_X			0
++#define MENU_ICON_Y			1
++#define MENU_ICON_XL		2
++#define MENU_ICON_XR		3
++
++extern int TOUCH_CONTROL_DEBUG;
++
++extern int maxX;
++extern int maxY;
++
++int get_menu_icon_info(int indx1, int indx2);
++
+ // Loosely track the depth of the current menu
+ int ui_menu_level;
+ 
+diff --git a/res/images/icon_clockwork.png b/res/images/icon_clockwork.png
+old mode 100644
+new mode 100755
+diff --git a/res/images/icon_error.png b/res/images/icon_error.png
+old mode 100644
+new mode 100755
+index cb3d1ab..90c8d87
+Binary files a/res/images/icon_error.png and b/res/images/icon_error.png differ
+diff --git a/res/images/icon_firmware_error.png b/res/images/icon_firmware_error.png
+old mode 100644
+new mode 100755
+diff --git a/res/images/icon_installing.png b/res/images/icon_installing.png
+old mode 100644
+new mode 100755
+index 571eb8b..d428f57
+Binary files a/res/images/icon_installing.png and b/res/images/icon_installing.png differ
+diff --git a/res/images/progress_empty.png b/res/images/progress_empty.png
+old mode 100644
+new mode 100755
+index 7258183..4cb4998
+Binary files a/res/images/progress_empty.png and b/res/images/progress_empty.png differ
+diff --git a/res/images/progress_fill.png b/res/images/progress_fill.png
+old mode 100644
+new mode 100755
+index becf87b..eb71754
+Binary files a/res/images/progress_fill.png and b/res/images/progress_fill.png differ
+diff --git a/ui.c b/ui.c
+index a56d8c0..533261b 100644
+--- a/ui.c
++++ b/ui.c
+@@ -63,12 +63,14 @@ UIParameters ui_parameters = {
+ 
+ static pthread_mutex_t gUpdateMutex = PTHREAD_MUTEX_INITIALIZER;
+ static gr_surface gBackgroundIcon[NUM_BACKGROUND_ICONS];
++static gr_surface gMenuIcon[NUM_MENU_ICON];
+ static gr_surface *gInstallationOverlay;
+ static gr_surface *gProgressBarIndeterminate;
+ static gr_surface gProgressBarEmpty;
+ static gr_surface gProgressBarFill;
+ static int ui_has_initialized = 0;
+ static int ui_log_stdout = 1;
++static int selMenuIcon = 0;
+ 
+ static const struct { gr_surface* surface; const char *name; } BITMAPS[] = {
+     { &gBackgroundIcon[BACKGROUND_ICON_INSTALLING], "icon_installing" },
+@@ -76,6 +78,14 @@ static const struct { gr_surface* surface; const char *name; } BITMAPS[] = {
+     { &gBackgroundIcon[BACKGROUND_ICON_CLOCKWORK],  "icon_clockwork" },
+     { &gBackgroundIcon[BACKGROUND_ICON_FIRMWARE_INSTALLING], "icon_firmware_install" },
+     { &gBackgroundIcon[BACKGROUND_ICON_FIRMWARE_ERROR], "icon_firmware_error" },
++    { &gMenuIcon[MENU_BACK],      "icon_back" },
++    { &gMenuIcon[MENU_DOWN],  	  "icon_down" },
++    { &gMenuIcon[MENU_UP], 		  "icon_up" },
++    { &gMenuIcon[MENU_SELECT],    "icon_select" },
++	{ &gMenuIcon[MENU_BACK_M],    "icon_backM" },
++    { &gMenuIcon[MENU_DOWN_M],    "icon_downM" },
++    { &gMenuIcon[MENU_UP_M], 	  "icon_upM" },
++    { &gMenuIcon[MENU_SELECT_M],  "icon_selectM" },
+     { &gProgressBarEmpty,               "progress_empty" },
+     { &gProgressBarFill,                "progress_fill" },
+     { NULL,                             NULL },
+@@ -113,7 +123,7 @@ static int max_menu_rows;
+ // Key event input queue
+ static pthread_mutex_t key_queue_mutex = PTHREAD_MUTEX_INITIALIZER;
+ static pthread_cond_t key_queue_cond = PTHREAD_COND_INITIALIZER;
+-static int key_queue[256], key_queue_len = 0;
++static int key_queue[256], key_queue_len = 0, key_queue_len_back = 0;
+ static volatile char key_pressed[KEY_MAX + 1];
+ 
+ // Return the current time as a double (including fractions of a second).
+@@ -159,6 +169,21 @@ static void draw_background_locked(int icon)
+     }
+ }
+ 
++// Draw the currently selected icon (if any) at given location.
++// Should only be called with gUpdateMutex locked.
++static void draw_icon_locked(gr_surface icon,int locX, int locY)
++{
++    gPagesIdentical = 0;
++
++    if (icon) {
++        int iconWidth = gr_get_width(icon);
++        int iconHeight = gr_get_height(icon);
++        int iconX = locX - iconWidth / 2;
++        int iconY = locY - iconHeight / 2;
++        gr_blit(icon, 0, 0, iconWidth, iconHeight, iconX, iconY);
++    }
++}
++
+ // Draw the progress bar (if any) on the screen.  Does not flip pages.
+ // Should only be called with gUpdateMutex locked.
+ static void draw_progress_locked()
+@@ -215,6 +240,15 @@ static void draw_text_line(int row, const char* t) {
+ static void draw_screen_locked(void)
+ {
+     if (!ui_has_initialized) return;
++    
++    //ToDo: Following structure should be global
++	struct { int x; int y; int xL; int xR; } MENU_ICON[] = {
++		{  get_menu_icon_info(MENU_BACK,MENU_ICON_X),	get_menu_icon_info(MENU_BACK,MENU_ICON_Y), get_menu_icon_info(MENU_BACK,MENU_ICON_XL), get_menu_icon_info(MENU_BACK,MENU_ICON_XR) },
++		{  get_menu_icon_info(MENU_DOWN,MENU_ICON_X),	get_menu_icon_info(MENU_DOWN,MENU_ICON_Y), get_menu_icon_info(MENU_DOWN,MENU_ICON_XL), get_menu_icon_info(MENU_DOWN,MENU_ICON_XR) },
++		{  get_menu_icon_info(MENU_UP,MENU_ICON_X),	get_menu_icon_info(MENU_UP,MENU_ICON_Y), get_menu_icon_info(MENU_UP,MENU_ICON_XL), get_menu_icon_info(MENU_UP,MENU_ICON_XR) },
++		{  get_menu_icon_info(MENU_SELECT,MENU_ICON_X),	get_menu_icon_info(MENU_SELECT,MENU_ICON_Y), get_menu_icon_info(MENU_SELECT,MENU_ICON_XL), get_menu_icon_info(MENU_SELECT,MENU_ICON_XR) },
++	};
++	
+     draw_background_locked(gCurrentIcon);
+     draw_progress_locked();
+ 
+@@ -228,6 +262,11 @@ static void draw_screen_locked(void)
+         int offset = 0;         // offset of separating bar under menus
+         int row = 0;            // current row that we are drawing on
+         if (show_menu) {
++        
++        draw_icon_locked(gMenuIcon[MENU_BACK], MENU_ICON[MENU_BACK].x, MENU_ICON[MENU_BACK].y );
++		draw_icon_locked(gMenuIcon[MENU_DOWN], MENU_ICON[MENU_DOWN].x, MENU_ICON[MENU_DOWN].y);
++		draw_icon_locked(gMenuIcon[MENU_UP], MENU_ICON[MENU_UP].x, MENU_ICON[MENU_UP].y );
++		draw_icon_locked(gMenuIcon[MENU_SELECT], MENU_ICON[MENU_SELECT].x, MENU_ICON[MENU_SELECT].y );
+             gr_color(MENU_TEXT_COLOR);
+             gr_fill(0, (menu_top + menu_sel - menu_show_start) * CHAR_HEIGHT,
+                     gr_fb_width(), (menu_top + menu_sel - menu_show_start + 1)*CHAR_HEIGHT+1);
+@@ -354,6 +393,92 @@ static void *progress_thread(void *cookie)
+     return NULL;
+ }
+ 
++// handle the action associated with user input touch events inside the ui handler
++int device_handle_mouse(struct keyStruct *key, int visible)
++{
++//ToDo: Following structure should be global
++	struct { int x; int y; int xL; int xR; } MENU_ICON[] = {
++		{  get_menu_icon_info(MENU_BACK,MENU_ICON_X),	get_menu_icon_info(MENU_BACK,MENU_ICON_Y), get_menu_icon_info(MENU_BACK,MENU_ICON_XL), get_menu_icon_info(MENU_BACK,MENU_ICON_XR) },
++		{  get_menu_icon_info(MENU_DOWN,MENU_ICON_X),	get_menu_icon_info(MENU_DOWN,MENU_ICON_Y), get_menu_icon_info(MENU_DOWN,MENU_ICON_XL), get_menu_icon_info(MENU_DOWN,MENU_ICON_XR) },
++		{  get_menu_icon_info(MENU_UP,MENU_ICON_X),	get_menu_icon_info(MENU_UP,MENU_ICON_Y), get_menu_icon_info(MENU_UP,MENU_ICON_XL), get_menu_icon_info(MENU_UP,MENU_ICON_XR) },
++		{  get_menu_icon_info(MENU_SELECT,MENU_ICON_X),	get_menu_icon_info(MENU_SELECT,MENU_ICON_Y), get_menu_icon_info(MENU_SELECT,MENU_ICON_XL), get_menu_icon_info(MENU_SELECT,MENU_ICON_XR) },
++	};
++
++	if (visible) {
++	int position;
++
++	position = key->x;
++
++		if(position > MENU_ICON[MENU_BACK].xL && position < MENU_ICON[MENU_BACK].xR)
++			return GO_BACK;
++		else if(position > MENU_ICON[MENU_DOWN].xL && position < MENU_ICON[MENU_DOWN].xR)
++			return HIGHLIGHT_DOWN;
++		else if(position > MENU_ICON[MENU_UP].xL && position < MENU_ICON[MENU_UP].xR)
++			return HIGHLIGHT_UP;
++		else if(position > MENU_ICON[MENU_SELECT].xL && position < MENU_ICON[MENU_SELECT].xR)
++			return SELECT_ITEM;
++    }
++	return NO_ACTION;
++}
++
++// handle the user input events (mainly the touch events) inside the ui handler
++static void ui_handle_mouse_input(int* curPos)
++{
++	pthread_mutex_lock(&key_queue_mutex);
++
++//ToDo: Following structure should be global
++	struct { int x; int y; int xL; int xR; } MENU_ICON[] = {
++		{  get_menu_icon_info(MENU_BACK,MENU_ICON_X),	get_menu_icon_info(MENU_BACK,MENU_ICON_Y), get_menu_icon_info(MENU_BACK,MENU_ICON_XL), get_menu_icon_info(MENU_BACK,MENU_ICON_XR) },
++		{  get_menu_icon_info(MENU_DOWN,MENU_ICON_X),	get_menu_icon_info(MENU_DOWN,MENU_ICON_Y), get_menu_icon_info(MENU_DOWN,MENU_ICON_XL), get_menu_icon_info(MENU_DOWN,MENU_ICON_XR) },
++		{  get_menu_icon_info(MENU_UP,MENU_ICON_X),	get_menu_icon_info(MENU_UP,MENU_ICON_Y), get_menu_icon_info(MENU_UP,MENU_ICON_XL), get_menu_icon_info(MENU_UP,MENU_ICON_XR) },
++		{  get_menu_icon_info(MENU_SELECT,MENU_ICON_X),	get_menu_icon_info(MENU_SELECT,MENU_ICON_Y), get_menu_icon_info(MENU_SELECT,MENU_ICON_XL), get_menu_icon_info(MENU_SELECT,MENU_ICON_XR) },
++	};
++
++if(TOUCH_CONTROL_DEBUG)
++{
++	ui_print("Touch gr_fb_width:\t%d,\tgr_fb_height:\t%d\n",gr_fb_width(),gr_fb_height());
++	ui_print("Touch X:\t%d,\tY:\t%d\n",curPos[1],curPos[2]);
++}
++
++  if (show_menu) {
++    if (curPos[0] > 0) {
++		int position;
++
++		position = curPos[1];
++
++		pthread_mutex_lock(&gUpdateMutex);
++		if(position > MENU_ICON[MENU_BACK].xL && position < MENU_ICON[MENU_BACK].xR ) {
++			draw_icon_locked(gMenuIcon[selMenuIcon], MENU_ICON[selMenuIcon].x, MENU_ICON[selMenuIcon].y );
++			draw_icon_locked(gMenuIcon[MENU_BACK_M], MENU_ICON[MENU_BACK].x, MENU_ICON[MENU_BACK].y );
++			selMenuIcon = MENU_BACK;
++			gr_flip();
++		}
++		else if(position > MENU_ICON[MENU_DOWN].xL && position < MENU_ICON[MENU_DOWN].xR ) {			
++			draw_icon_locked(gMenuIcon[selMenuIcon], MENU_ICON[selMenuIcon].x, MENU_ICON[selMenuIcon].y );
++			draw_icon_locked(gMenuIcon[MENU_DOWN_M], MENU_ICON[MENU_DOWN].x, MENU_ICON[MENU_DOWN].y);
++			selMenuIcon = MENU_DOWN;
++			gr_flip();
++		}
++		else if(position > MENU_ICON[MENU_UP].xL && position < MENU_ICON[MENU_UP].xR ) {
++			draw_icon_locked(gMenuIcon[selMenuIcon], MENU_ICON[selMenuIcon].x, MENU_ICON[selMenuIcon].y );			
++			draw_icon_locked(gMenuIcon[MENU_UP_M], MENU_ICON[MENU_UP].x, MENU_ICON[MENU_UP].y );
++			selMenuIcon = MENU_UP;
++			gr_flip();
++		}
++		else if(position > MENU_ICON[MENU_SELECT].xL && position < MENU_ICON[MENU_SELECT].xR ) {
++			draw_icon_locked(gMenuIcon[selMenuIcon], MENU_ICON[selMenuIcon].x, MENU_ICON[selMenuIcon].y );			
++			draw_icon_locked(gMenuIcon[MENU_SELECT_M], MENU_ICON[MENU_SELECT].x, MENU_ICON[MENU_SELECT].y );
++			selMenuIcon = MENU_SELECT;
++			gr_flip();
++		}
++		key_queue_len_back = key_queue_len;
++		pthread_mutex_unlock(&gUpdateMutex);
++     }
++  }
++  pthread_mutex_unlock(&key_queue_mutex);
++}
++
++
+ static int rel_sum = 0;
+ 
+ static int input_callback(int fd, short revents, void *data)
+@@ -760,7 +885,7 @@ static int usb_connected() {
+     return connected;
+ }
+ 
+-int ui_wait_key()
++struct keyStruct *ui_wait_key()
+ {
+     pthread_mutex_lock(&key_queue_mutex);
+ 
+@@ -783,11 +908,21 @@ int ui_wait_key()
+ 
+     int key = -1;
+     if (key_queue_len > 0) {
+-        key = key_queue[0];
++        key.code = key_queue[0];
+         memcpy(&key_queue[0], &key_queue[1], sizeof(int) * --key_queue_len);
+-    }
++
++if(TOUCH_CONTROL_DEBUG)
++	ui_print("[UI_WAIT_KEY] key code:\t%d\n",key.code);
++
++	if((key.code == BTN_GEAR_UP || key.code == BTN_MOUSE) && !actPos.pressure && oldMousePos[actPos.num].pressure && key_queue_len_back != (key_queue_len -1))
++	{	
++		key.code = ABS_MT_POSITION_X;
++		key.x = oldMousePos[actPos.num].x;
++		key.y = oldMousePos[actPos.num].y;
++	}
++
+     pthread_mutex_unlock(&key_queue_mutex);
+-    return key;
++	return &key;
+ }
+ 
+ int ui_key_pressed(int key)
